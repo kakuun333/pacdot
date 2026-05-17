@@ -13,7 +13,7 @@
 
 namespace fs = std::filesystem;
 
-struct DotfileDefinition
+struct PathGroupDefinition
 {
     std::string Name;
     std::vector<fs::path> Paths;
@@ -25,7 +25,8 @@ struct DotfileDefinition
 struct Config
 {
     fs::path Path;
-    std::vector<DotfileDefinition> Dotfiles;
+    std::vector<PathGroupDefinition> Dotfiles;
+    std::vector<PathGroupDefinition> Files;
     bool BackupSystemdEnabledUnits = false;
     bool BackupSystemdUserEnabledUnits = false;
     bool BackupPackages = false;
@@ -71,18 +72,18 @@ std::optional<fs::path> FindConfigPath(const fs::path& ExecutableDirectory)
     return std::nullopt;
 }
 
-DotfileDefinition& GetOrCreateDotfile(Config& ConfigValue, const std::string& Name)
+PathGroupDefinition& GetOrCreateGroup(std::vector<PathGroupDefinition>& Groups, const std::string& Name)
 {
-    for (auto& Dotfile : ConfigValue.Dotfiles)
+    for (auto& Group : Groups)
     {
-        if (Dotfile.Name == Name)
+        if (Group.Name == Name)
         {
-            return Dotfile;
+            return Group;
         }
     }
 
-    ConfigValue.Dotfiles.push_back({ Name, {}, {}, true, true });
-    return ConfigValue.Dotfiles.back();
+    Groups.push_back({ Name, {}, {}, true, true });
+    return Groups.back();
 }
 
 bool LoadStringArray(const toml::table& Table, const std::string_view Key, std::vector<fs::path>& OutPaths)
@@ -136,6 +137,31 @@ bool ReadBoolOrDefault(const toml::table& Table, const std::string_view Key, con
     return DefaultValue;
 }
 
+void LoadPathGroups(const toml::table& ParsedConfig, const std::string_view TableName, std::vector<PathGroupDefinition>& Groups)
+{
+    if (const auto* SectionTable = ParsedConfig[TableName].as_table())
+    {
+        for (const auto& [Name, Node] : *SectionTable)
+        {
+            const auto* GroupTable = Node.as_table();
+
+            if (GroupTable == nullptr)
+            {
+                continue;
+            }
+
+            auto& Group = GetOrCreateGroup(Groups, std::string{ Name.str() });
+
+            LoadStringArray(*GroupTable, "paths", Group.Paths);
+            LoadStringArray(*GroupTable, "exclude", Group.Excludes);
+            LoadStringArray(*GroupTable, "excludes", Group.Excludes);
+
+            Group.BackupEmptyFiles = ReadBoolOrDefault(*GroupTable, "backup_empty_files", true);
+            Group.BackupEmptyDirectories = ReadBoolOrDefault(*GroupTable, "backup_empty_dirs", true);
+        }
+    }
+}
+
 std::optional<Config> LoadConfig(const fs::path& ExecutableDirectory)
 {
     const auto ConfigPath = FindConfigPath(ExecutableDirectory);
@@ -161,27 +187,8 @@ std::optional<Config> LoadConfig(const fs::path& ExecutableDirectory)
     Config LoadedConfig;
     LoadedConfig.Path = *ConfigPath;
 
-    if (const auto* DotfilesTable = ParsedConfig["dotfiles"].as_table())
-    {
-        for (const auto& [Name, Node] : *DotfilesTable)
-        {
-            const auto* DotfileTable = Node.as_table();
-
-            if (DotfileTable == nullptr)
-            {
-                continue;
-            }
-
-            auto& Dotfile = GetOrCreateDotfile(LoadedConfig, std::string{ Name.str() });
-
-            LoadStringArray(*DotfileTable, "paths", Dotfile.Paths);
-            LoadStringArray(*DotfileTable, "exclude", Dotfile.Excludes);
-            LoadStringArray(*DotfileTable, "excludes", Dotfile.Excludes);
-
-            Dotfile.BackupEmptyFiles = ReadBoolOrDefault(*DotfileTable, "backup_empty_files", true);
-            Dotfile.BackupEmptyDirectories = ReadBoolOrDefault(*DotfileTable, "backup_empty_dirs", true);
-        }
-    }
+    LoadPathGroups(ParsedConfig, "dotfiles", LoadedConfig.Dotfiles);
+    LoadPathGroups(ParsedConfig, "files", LoadedConfig.Files);
 
     if (const auto* SystemdTable = ParsedConfig["systemd"].as_table())
     {
@@ -484,16 +491,16 @@ int RunCommand(const std::string& Command)
     return std::system(Command.c_str());
 }
 
-fs::path BackupPathFor(const fs::path& Root, const std::string& Name, const fs::path& Source, const fs::path& Home)
+fs::path BackupPathFor(const fs::path& Root, const std::string& Category, const std::string& Name, const fs::path& Source, const fs::path& Home)
 {
-    return Root / "dotfiles" / Name / BackupRelativePathFor(Source, Home);
+    return Root / Category / Name / BackupRelativePathFor(Source, Home);
 }
 
-std::vector<fs::path> BuildSourceExcludes(const DotfileDefinition& Dotfile, const fs::path& Home)
+std::vector<fs::path> BuildSourceExcludes(const PathGroupDefinition& Group, const fs::path& Home)
 {
     std::vector<fs::path> Excludes;
 
-    for (const auto& Exclude : Dotfile.Excludes)
+    for (const auto& Exclude : Group.Excludes)
     {
         Excludes.push_back(ExpandConfigPath(Exclude, Home));
     }
@@ -501,13 +508,13 @@ std::vector<fs::path> BuildSourceExcludes(const DotfileDefinition& Dotfile, cons
     return Excludes;
 }
 
-std::vector<fs::path> BuildBackupExcludes(const DotfileDefinition& Dotfile, const fs::path& Root, const fs::path& Home)
+std::vector<fs::path> BuildBackupExcludes(const PathGroupDefinition& Group, const fs::path& Root, const fs::path& Home, const std::string& Category)
 {
     std::vector<fs::path> Excludes;
 
-    for (const auto& Exclude : Dotfile.Excludes)
+    for (const auto& Exclude : Group.Excludes)
     {
-        Excludes.push_back(BackupPathFor(Root, Dotfile.Name, ExpandConfigPath(Exclude, Home), Home));
+        Excludes.push_back(BackupPathFor(Root, Category, Group.Name, ExpandConfigPath(Exclude, Home), Home));
     }
 
     return Excludes;
@@ -646,7 +653,7 @@ bool CopyPath(
     return CopyFileReplacing(Source, Destination);
 }
 
-int ExportDotfiles(const fs::path& Root, const Config& ConfigValue)
+int ExportPathGroups(const fs::path& Root, const std::vector<PathGroupDefinition>& Groups, const std::string& CategoryLabel, const std::string& Category)
 {
     const char* HomeValue = std::getenv("HOME");
 
@@ -659,23 +666,23 @@ int ExportDotfiles(const fs::path& Root, const Config& ConfigValue)
     const fs::path Home = HomeValue;
     int Result = 0;
 
-    for (const auto& Dotfile : ConfigValue.Dotfiles)
+    for (const auto& Group : Groups)
     {
-        const std::vector<fs::path> SourceExcludes = BuildSourceExcludes(Dotfile, Home);
-        const std::vector<fs::path> DestinationExcludes = BuildBackupExcludes(Dotfile, Root, Home);
+        const std::vector<fs::path> SourceExcludes = BuildSourceExcludes(Group, Home);
+        const std::vector<fs::path> DestinationExcludes = BuildBackupExcludes(Group, Root, Home, Category);
 
-        for (const auto& ConfigPath : Dotfile.Paths)
+        for (const auto& ConfigPath : Group.Paths)
         {
             const fs::path Source = ExpandConfigPath(ConfigPath, Home);
 
-            if (const fs::path Destination = BackupPathFor(Root, Dotfile.Name, Source, Home); !CopyPath(
+            if (const fs::path Destination = BackupPathFor(Root, Category, Group.Name, Source, Home); !CopyPath(
                     Source,
                     Destination,
                     SourceExcludes,
                     DestinationExcludes,
                     false,
-                    Dotfile.BackupEmptyFiles,
-                    Dotfile.BackupEmptyDirectories))
+                    Group.BackupEmptyFiles,
+                    Group.BackupEmptyDirectories))
             {
                 Result = 1;
             }
@@ -684,13 +691,13 @@ int ExportDotfiles(const fs::path& Root, const Config& ConfigValue)
 
     if (Result == 0)
     {
-        std::cout << "Dotfiles exported successfully.\n";
+        std::cout << CategoryLabel << " exported successfully.\n";
     }
 
     return Result;
 }
 
-int RestoreDotfiles(const fs::path& Root, const Config& ConfigValue, const bool bDryRun)
+int RestorePathGroups(const fs::path& Root, const std::vector<PathGroupDefinition>& Groups, const std::string& CategoryLabel, const std::string& Category, const bool bDryRun)
 {
     const char* HomeValue = std::getenv("HOME");
 
@@ -703,16 +710,16 @@ int RestoreDotfiles(const fs::path& Root, const Config& ConfigValue, const bool 
     const fs::path Home = HomeValue;
     int Result = 0;
 
-    for (const auto& Dotfile : ConfigValue.Dotfiles)
+    for (const auto& Group : Groups)
     {
-        const std::vector<fs::path> SourceExcludes = BuildBackupExcludes(Dotfile, Root, Home);
-        const std::vector<fs::path> DestinationExcludes = BuildSourceExcludes(Dotfile, Home);
+        const std::vector<fs::path> SourceExcludes = BuildBackupExcludes(Group, Root, Home, Category);
+        const std::vector<fs::path> DestinationExcludes = BuildSourceExcludes(Group, Home);
 
-        for (const auto& ConfigPath : Dotfile.Paths)
+        for (const auto& ConfigPath : Group.Paths)
         {
             const fs::path Destination = ExpandConfigPath(ConfigPath, Home);
 
-            if (const fs::path Source = BackupPathFor(Root, Dotfile.Name, Destination, Home); !CopyPath(Source, Destination, SourceExcludes, DestinationExcludes, bDryRun, true, true))
+            if (const fs::path Source = BackupPathFor(Root, Category, Group.Name, Destination, Home); !CopyPath(Source, Destination, SourceExcludes, DestinationExcludes, bDryRun, true, true))
             {
                 Result = 1;
             }
@@ -721,10 +728,30 @@ int RestoreDotfiles(const fs::path& Root, const Config& ConfigValue, const bool 
 
     if (Result == 0)
     {
-        std::cout << "Dotfiles restored successfully.\n";
+        std::cout << CategoryLabel << " restored successfully.\n";
     }
 
     return Result;
+}
+
+int ExportDotfiles(const fs::path& Root, const Config& ConfigValue)
+{
+    return ExportPathGroups(Root, ConfigValue.Dotfiles, "Dotfiles", "dotfiles");
+}
+
+int ExportFiles(const fs::path& Root, const Config& ConfigValue)
+{
+    return ExportPathGroups(Root, ConfigValue.Files, "Files", "files");
+}
+
+int RestoreDotfiles(const fs::path& Root, const Config& ConfigValue, const bool bDryRun)
+{
+    return RestorePathGroups(Root, ConfigValue.Dotfiles, "Dotfiles", "dotfiles", bDryRun);
+}
+
+int RestoreFiles(const fs::path& Root, const Config& ConfigValue, const bool bDryRun)
+{
+    return RestorePathGroups(Root, ConfigValue.Files, "Files", "files", bDryRun);
 }
 
 fs::path SystemdEnabledUnitsPath(const fs::path& Root, const bool User)
@@ -1153,6 +1180,7 @@ int ExportAll(const fs::path& Root, const Config& ConfigValue)
 
     int Result = 0;
     Result |= ExportDotfiles(Root, ConfigValue);
+    Result |= ExportFiles(Root, ConfigValue);
 
     if (ConfigValue.BackupSystemdEnabledUnits)
     {
@@ -1176,6 +1204,7 @@ int RestoreAll(const fs::path& Root, const Config& ConfigValue, const bool DryRu
 {
     int Result = 0;
     Result |= RestoreDotfiles(Root, ConfigValue, DryRun);
+    Result |= RestoreFiles(Root, ConfigValue, DryRun);
 
     if (ConfigValue.BackupSystemdEnabledUnits)
     {
@@ -1210,6 +1239,8 @@ void PrintHelp()
     std::cout << "  pacdot restore [--dry-run] [--install-packages]\n";
     std::cout << "  pacdot dotfiles export\n";
     std::cout << "  pacdot dotfiles restore [--dry-run]\n";
+    std::cout << "  pacdot files export\n";
+    std::cout << "  pacdot files restore [--dry-run]\n";
     std::cout << "  pacdot packages export\n";
     std::cout << "  pacdot packages restore [--dry-run]\n";
     std::cout << '\n';
@@ -1219,6 +1250,8 @@ void PrintHelp()
     std::cout << "  restore [--dry-run] [--install-packages] Restore configured data from pacdot-export.\n";
     std::cout << "  dotfiles export                         Export only configured dotfiles.\n";
     std::cout << "  dotfiles restore [--dry-run]            Restore only configured dotfiles.\n";
+    std::cout << "  files export                            Export only configured files.\n";
+    std::cout << "  files restore [--dry-run]               Restore only configured files.\n";
     std::cout << "  packages export                         Export only configured package lists.\n";
     std::cout << "  packages restore [--dry-run]            Install only backed up package lists.\n";
     std::cout << '\n';
@@ -1296,6 +1329,34 @@ int main(int Argc, char* Argv[])
         if (DotfileCommand == "restore")
         {
             return RestoreDotfiles(ExportRoot, *LoadedConfig, HasArg(Argc, Argv, "--dry-run"));
+        }
+    }
+
+    if (Command == "files")
+    {
+        if (Argc < 3)
+        {
+            PrintHelp();
+            return 1;
+        }
+
+        const auto LoadedConfig = LoadConfig(ExecutableDirectory);
+
+        if (!LoadedConfig)
+        {
+            return 1;
+        }
+
+        const std::string FilesCommand = Argv[2];
+
+        if (FilesCommand == "export")
+        {
+            return ExportFiles(ExportRoot, *LoadedConfig);
+        }
+
+        if (FilesCommand == "restore")
+        {
+            return RestoreFiles(ExportRoot, *LoadedConfig, HasArg(Argc, Argv, "--dry-run"));
         }
     }
 
