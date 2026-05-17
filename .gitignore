@@ -1,0 +1,9 @@
+﻿# pacdot
+pacdot.toml
+
+# Jetbrains
+.idea
+
+# build
+build
+pacdot-export

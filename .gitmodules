@@ -1,0 +1,6 @@
+[submodule "Dependencies/glob-cpp"]
+	path = Dependencies/glob-cpp
+	url = https://github.com/alexst07/glob-cpp.git
+[submodule "Dependencies/tomlplusplus"]
+	path = Dependencies/tomlplusplus
+	url = https://github.com/marzer/tomlplusplus.git
