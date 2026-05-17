@@ -54,13 +54,16 @@ pacdot packages restore [--dry-run]
 
 `pacdot.toml` lives at `~/.config/pacdot/pacdot.toml`.
 
-A minimal example:
+example:
 
 ```toml
-[dotfiles.nvim]
+[dotfiles.DankMaterialShell]
 paths = [
-    "~/.config/nvim",
+    "~/.config/DankMaterialShell",
+    "~/.local/state/DankMaterialShell"
 ]
+backup_empty_files = false
+backup_empty_dirs = false
 
 [files.wallpapers]
 paths = [
@@ -79,9 +82,15 @@ backup_user_enabled_units = true
 
 [packages]
 backup = true
-exclude_pacman = []
-exclude_aur = []
-exclude_flatpak = []
+exclude_pacman = [
+    "steam",
+]
+exclude_aur = [
+    "paru-debug",
+]
+exclude_flatpak = [
+    "com.jetbrains.CLion",
+]
 ```
 
 ### Config Sections
