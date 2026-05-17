@@ -709,6 +709,24 @@ std::vector<std::string> FilterExcluded(const std::vector<std::string>& Values, 
     return FilteredValues;
 }
 
+std::vector<std::string> FilterGeneratedDebugPackages(const std::vector<std::string>& Packages)
+{
+    std::vector<std::string> FilteredPackages;
+
+    for (const auto& Package : Packages)
+    {
+        if (Package.ends_with("-debug"))
+        {
+            std::cout << "[SKIP] " << Package << " is a generated debug package.\n";
+            continue;
+        }
+
+        FilteredPackages.push_back(Package);
+    }
+
+    return FilteredPackages;
+}
+
 bool ReadCommandLines(const std::string& Command, std::vector<std::string>& OutLines)
 {
     std::array<char, 256> Buffer{};
@@ -789,7 +807,13 @@ int ExportPackageList(
         return 1;
     }
 
-    const std::vector<std::string> Packages = FilterExcluded(CommandOutput, Excludes);
+    std::vector<std::string> Packages = FilterExcluded(CommandOutput, Excludes);
+
+    if (Name == "aur")
+    {
+        Packages = FilterGeneratedDebugPackages(Packages);
+    }
+
     const fs::path Destination = PackageListPath(Root, Name);
 
     if (!WriteLines(Destination, Packages))
@@ -833,18 +857,14 @@ std::string JoinShellArgs(const std::vector<std::string>& Values)
     return Joined;
 }
 
-int RestorePackageList(
-    const fs::path& Root,
-    const std::string& Name,
-    const std::string& InstallPrefix,
-    const bool DryRun)
+std::vector<std::string> ReadPackageList(const fs::path& Root, const std::string& Name)
 {
     const fs::path Source = PackageListPath(Root, Name);
 
     if (!fs::exists(Source))
     {
         std::cout << "[SKIP] " << Source << " does not exist.\n";
-        return 0;
+        return {};
     }
 
     const std::vector<std::string> Packages = ReadLines(Source);
@@ -852,6 +872,15 @@ int RestorePackageList(
     if (Packages.empty())
     {
         std::cout << "[SKIP] " << Source << " is empty.\n";
+    }
+
+    return Packages;
+}
+
+int RestorePackagesWithCommand(const std::vector<std::string>& Packages, const std::string& InstallPrefix, const bool DryRun)
+{
+    if (Packages.empty())
+    {
         return 0;
     }
 
@@ -866,6 +895,53 @@ int RestorePackageList(
     return RunCommand(Command) == 0 ? 0 : 1;
 }
 
+int RestorePackageList(
+    const fs::path& Root,
+    const std::string& Name,
+    const std::string& InstallPrefix,
+    const bool DryRun)
+{
+    return RestorePackagesWithCommand(ReadPackageList(Root, Name), InstallPrefix, DryRun);
+}
+
+int RestoreAurPackageList(const fs::path& Root, const bool DryRun)
+{
+    return RestorePackagesWithCommand(FilterGeneratedDebugPackages(ReadPackageList(Root, "aur")), "paru -S --needed -- ", DryRun);
+}
+
+int RestoreFlatpakPackageList(const fs::path& Root, const bool DryRun)
+{
+    const std::vector<std::string> Packages = ReadPackageList(Root, "flatpak");
+
+    if (Packages.empty())
+    {
+        return 0;
+    }
+
+    const std::string RepairCommand = "flatpak repair --user";
+    const std::string RemoteCommand = "flatpak --user remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo";
+
+    if (DryRun)
+    {
+        std::cout << "[DRY-RUN] " << RepairCommand << '\n';
+        std::cout << "[DRY-RUN] " << RemoteCommand << '\n';
+    }
+    else
+    {
+        if (RunCommand(RepairCommand) != 0)
+        {
+            std::cerr << "Could not repair the user Flatpak installation; continuing with remote setup.\n";
+        }
+
+        if (RunCommand(RemoteCommand) != 0)
+        {
+            return 1;
+        }
+    }
+
+    return RestorePackagesWithCommand(Packages, "flatpak --user install -y flathub ", DryRun);
+}
+
 int RestorePackages(const fs::path& Root, const Config& ConfigValue, const bool DryRun)
 {
     if (!ConfigValue.BackupPackages)
@@ -876,8 +952,8 @@ int RestorePackages(const fs::path& Root, const Config& ConfigValue, const bool 
 
     int Result = 0;
     Result |= RestorePackageList(Root, "pacman", "sudo pacman -S --needed -- ", DryRun);
-    Result |= RestorePackageList(Root, "aur", "paru -S --needed -- ", DryRun);
-    Result |= RestorePackageList(Root, "flatpak", "flatpak install -y flathub ", DryRun);
+    Result |= RestoreAurPackageList(Root, DryRun);
+    Result |= RestoreFlatpakPackageList(Root, DryRun);
     return Result == 0 ? 0 : 1;
 }
 
