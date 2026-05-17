@@ -29,13 +29,13 @@ Build the project, then run one of the commands below.
 
 ```bash
 pacdot paths
-pacdot export
+pacdot export [--clean-first]
 pacdot restore [--dry-run] [--install-packages]
-pacdot dotfiles export
+pacdot dotfiles export [--clean-first]
 pacdot dotfiles restore [--dry-run]
-pacdot files export
+pacdot files export [--clean-first]
 pacdot files restore [--dry-run]
-pacdot packages export
+pacdot packages export [--clean-first]
 pacdot packages restore [--dry-run]
 ```
 
@@ -45,6 +45,8 @@ pacdot packages restore [--dry-run]
 - export root: `~/.local/share/pacdot/export/`
 
 `export` writes the current state into the export root.
+
+`--clean-first` clears the export root before exporting.
 
 `restore` applies the exported state back to the machine. Use `--install-packages` to restore package lists in addition to dotfiles, files, and systemd units.
 

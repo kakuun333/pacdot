@@ -1385,29 +1385,30 @@ void PrintHelp()
     std::cout << "Usage:\n";
     std::cout << "  pacdot --help\n";
     std::cout << "  pacdot paths\n";
-    std::cout << "  pacdot export\n";
+    std::cout << "  pacdot export [--clean-first]\n";
     std::cout << "  pacdot restore [--dry-run] [--install-packages]\n";
-    std::cout << "  pacdot dotfiles export\n";
+    std::cout << "  pacdot dotfiles export [--clean-first]\n";
     std::cout << "  pacdot dotfiles restore [--dry-run]\n";
-    std::cout << "  pacdot files export\n";
+    std::cout << "  pacdot files export [--clean-first]\n";
     std::cout << "  pacdot files restore [--dry-run]\n";
-    std::cout << "  pacdot packages export\n";
+    std::cout << "  pacdot packages export [--clean-first]\n";
     std::cout << "  pacdot packages restore [--dry-run]\n";
     std::cout << '\n';
     std::cout << "Commands:\n";
     std::cout << "  --help, -h                              Show this help message.\n";
     std::cout << "  paths                                   Show the resolved config and export paths.\n";
-    std::cout << "  export                                  Export configured data into pacdot-export.\n";
+    std::cout << "  export [--clean-first]                  Export configured data into pacdot-export.\n";
     std::cout << "  restore [--dry-run] [--install-packages] Restore configured data from pacdot-export.\n";
-    std::cout << "  dotfiles export                         Export only configured dotfiles.\n";
+    std::cout << "  dotfiles export [--clean-first]         Export only configured dotfiles.\n";
     std::cout << "  dotfiles restore [--dry-run]            Restore only configured dotfiles.\n";
-    std::cout << "  files export                            Export only configured files.\n";
+    std::cout << "  files export [--clean-first]            Export only configured files.\n";
     std::cout << "  files restore [--dry-run]               Restore only configured files.\n";
-    std::cout << "  packages export                         Export only configured package lists.\n";
+    std::cout << "  packages export [--clean-first]         Export only configured package lists.\n";
     std::cout << "  packages restore [--dry-run]            Install only backed up package lists.\n";
     std::cout << '\n';
     std::cout << "Options:\n";
     std::cout << "  --dry-run                               Print restore actions without changing files or installing packages.\n";
+    std::cout << "  --clean-first                           Clear the export root before running an export command.\n";
     std::cout << "  --install-packages                      Install backed up pacman, AUR, and Flatpak packages during restore.\n";
 }
 
@@ -1428,6 +1429,29 @@ bool HasArg(const int Argc, char* Argv[], const std::string& Expected)
     }
 
     return false;
+}
+
+bool CleanExportRoot(const fs::path& ExportRoot)
+{
+    std::error_code Error;
+    fs::remove_all(ExportRoot, Error);
+
+    if (Error)
+    {
+        std::cerr << "Could not clean " << ExportRoot << ": " << Error.message() << '\n';
+        return false;
+    }
+
+    fs::create_directories(ExportRoot, Error);
+
+    if (Error)
+    {
+        std::cerr << "Could not recreate " << ExportRoot << ": " << Error.message() << '\n';
+        return false;
+    }
+
+    std::cout << "[CLEAN] " << ExportRoot << '\n';
+    return true;
 }
 
 int main(int Argc, char* Argv[])
@@ -1456,8 +1480,19 @@ int main(int Argc, char* Argv[])
 
     if (Command == "export")
     {
+        const bool CleanFirst = HasArg(Argc, Argv, "--clean-first");
         const auto LoadedConfig = LoadConfig();
-        return LoadedConfig ? ExportAll(ExportRoot, *LoadedConfig) : 1;
+        if (!LoadedConfig)
+        {
+            return 1;
+        }
+
+        if (CleanFirst && !CleanExportRoot(ExportRoot))
+        {
+            return 1;
+        }
+
+        return ExportAll(ExportRoot, *LoadedConfig);
     }
 
     if (Command == "restore")
@@ -1485,6 +1520,11 @@ int main(int Argc, char* Argv[])
 
         if (DotfileCommand == "export")
         {
+            if (HasArg(Argc, Argv, "--clean-first") && !CleanExportRoot(ExportRoot))
+            {
+                return 1;
+            }
+
             return ExportDotfiles(ExportRoot, *LoadedConfig);
         }
 
@@ -1513,6 +1553,11 @@ int main(int Argc, char* Argv[])
 
         if (FilesCommand == "export")
         {
+            if (HasArg(Argc, Argv, "--clean-first") && !CleanExportRoot(ExportRoot))
+            {
+                return 1;
+            }
+
             return ExportFiles(ExportRoot, *LoadedConfig);
         }
 
@@ -1541,6 +1586,11 @@ int main(int Argc, char* Argv[])
 
         if (PackagesCommand == "export")
         {
+            if (HasArg(Argc, Argv, "--clean-first") && !CleanExportRoot(ExportRoot))
+            {
+                return 1;
+            }
+
             return ExportPackages(ExportRoot, *LoadedConfig);
         }
 
