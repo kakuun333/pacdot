@@ -53,12 +53,62 @@ fs::path GetExecutableDirectory(const char* Argv0)
     return fs::weakly_canonical(ExecutablePath).parent_path();
 }
 
-std::optional<fs::path> FindConfigPath(const fs::path& ExecutableDirectory)
+std::optional<fs::path> GetHomeDirectory()
+{
+    if (const char* HomeValue = std::getenv("HOME"); HomeValue != nullptr && HomeValue[0] != '\0')
+    {
+        return fs::path(HomeValue);
+    }
+
+    return std::nullopt;
+}
+
+fs::path GetUserConfigRoot()
+{
+    if (const char* ConfigHomeValue = std::getenv("XDG_CONFIG_HOME"); ConfigHomeValue != nullptr && ConfigHomeValue[0] != '\0')
+    {
+        return fs::path(ConfigHomeValue);
+    }
+
+    if (const auto Home = GetHomeDirectory())
+    {
+        return *Home / ".config";
+    }
+
+    return {};
+}
+
+fs::path GetUserDataRoot()
+{
+    if (const char* DataHomeValue = std::getenv("XDG_DATA_HOME"); DataHomeValue != nullptr && DataHomeValue[0] != '\0')
+    {
+        return fs::path(DataHomeValue);
+    }
+
+    if (const auto Home = GetHomeDirectory())
+    {
+        return *Home / ".local" / "share";
+    }
+
+    return {};
+}
+
+fs::path GetDefaultConfigPath()
+{
+    return GetUserConfigRoot() / "pacdot" / "pacdot.toml";
+}
+
+fs::path GetDefaultExportRoot()
+{
+    return GetUserDataRoot() / "pacdot" / "export";
+}
+
+std::optional<fs::path> FindConfigPath()
 {
     const std::vector<fs::path> Candidates = {
+        GetDefaultConfigPath(),
         fs::current_path() / "pacdot.toml",
-        ExecutableDirectory / "pacdot.toml",
-        ExecutableDirectory / "pacdot-export/pacdot.toml",
+        GetDefaultExportRoot() / "pacdot.toml",
     };
 
     for (const auto& Candidate : Candidates)
@@ -162,13 +212,13 @@ void LoadPathGroups(const toml::table& ParsedConfig, const std::string_view Tabl
     }
 }
 
-std::optional<Config> LoadConfig(const fs::path& ExecutableDirectory)
+std::optional<Config> LoadConfig()
 {
-    const auto ConfigPath = FindConfigPath(ExecutableDirectory);
+    const auto ConfigPath = FindConfigPath();
 
     if (!ConfigPath)
     {
-        std::cerr << "Could not find pacdot.toml next to the executable or in the current directory.\n";
+        std::cerr << "Could not find pacdot.toml in ~/.config/pacdot, the current directory, or the export root.\n";
         return std::nullopt;
     }
 
@@ -1235,6 +1285,7 @@ void PrintHelp()
 {
     std::cout << "Usage:\n";
     std::cout << "  pacdot --help\n";
+    std::cout << "  pacdot paths\n";
     std::cout << "  pacdot export\n";
     std::cout << "  pacdot restore [--dry-run] [--install-packages]\n";
     std::cout << "  pacdot dotfiles export\n";
@@ -1246,6 +1297,7 @@ void PrintHelp()
     std::cout << '\n';
     std::cout << "Commands:\n";
     std::cout << "  --help, -h                              Show this help message.\n";
+    std::cout << "  paths                                   Show the resolved config and export paths.\n";
     std::cout << "  export                                  Export configured data into pacdot-export.\n";
     std::cout << "  restore [--dry-run] [--install-packages] Restore configured data from pacdot-export.\n";
     std::cout << "  dotfiles export                         Export only configured dotfiles.\n";
@@ -1258,6 +1310,12 @@ void PrintHelp()
     std::cout << "Options:\n";
     std::cout << "  --dry-run                               Print restore actions without changing files or installing packages.\n";
     std::cout << "  --install-packages                      Install backed up pacman, AUR, and Flatpak packages during restore.\n";
+}
+
+void PrintResolvedPaths()
+{
+    std::cout << "config: " << GetDefaultConfigPath() << '\n';
+    std::cout << "export: " << GetDefaultExportRoot() << '\n';
 }
 
 bool HasArg(const int Argc, char* Argv[], const std::string& Expected)
@@ -1275,8 +1333,7 @@ bool HasArg(const int Argc, char* Argv[], const std::string& Expected)
 
 int main(int Argc, char* Argv[])
 {
-    const fs::path ExecutableDirectory = GetExecutableDirectory(Argv[0]);
-    const fs::path ExportRoot = ExecutableDirectory / "pacdot-export";
+    const fs::path ExportRoot = GetDefaultExportRoot();
 
     if (Argc < 2)
     {
@@ -1292,15 +1349,21 @@ int main(int Argc, char* Argv[])
         return 0;
     }
 
+    if (Command == "paths")
+    {
+        PrintResolvedPaths();
+        return 0;
+    }
+
     if (Command == "export")
     {
-        const auto LoadedConfig = LoadConfig(ExecutableDirectory);
+        const auto LoadedConfig = LoadConfig();
         return LoadedConfig ? ExportAll(ExportRoot, *LoadedConfig) : 1;
     }
 
     if (Command == "restore")
     {
-        const auto LoadedConfig = LoadConfig(ExecutableDirectory);
+        const auto LoadedConfig = LoadConfig();
         return LoadedConfig ? RestoreAll(ExportRoot, *LoadedConfig, HasArg(Argc, Argv, "--dry-run"), HasArg(Argc, Argv, "--install-packages")) : 1;
     }
 
@@ -1312,7 +1375,7 @@ int main(int Argc, char* Argv[])
             return 1;
         }
 
-        const auto LoadedConfig = LoadConfig(ExecutableDirectory);
+        const auto LoadedConfig = LoadConfig();
 
         if (!LoadedConfig)
         {
@@ -1340,7 +1403,7 @@ int main(int Argc, char* Argv[])
             return 1;
         }
 
-        const auto LoadedConfig = LoadConfig(ExecutableDirectory);
+        const auto LoadedConfig = LoadConfig();
 
         if (!LoadedConfig)
         {
@@ -1368,7 +1431,7 @@ int main(int Argc, char* Argv[])
             return 1;
         }
 
-        const auto LoadedConfig = LoadConfig(ExecutableDirectory);
+        const auto LoadedConfig = LoadConfig();
 
         if (!LoadedConfig)
         {
