@@ -1,5 +1,7 @@
 #include "glob-cpp/glob.h"
 #include "toml++/toml.hpp"
+#include <array>
+#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -25,6 +27,10 @@ struct Config
     std::vector<DotfileDefinition> Dotfiles;
     bool BackupSystemdEnabledUnits = false;
     bool BackupSystemdUserEnabledUnits = false;
+    bool BackupPackages = false;
+    std::vector<std::string> ExcludedPacmanPackages;
+    std::vector<std::string> ExcludedAurPackages;
+    std::vector<std::string> ExcludedFlatpakPackages;
 };
 
 fs::path GetExecutableDirectory(const char* Argv0)
@@ -99,6 +105,26 @@ bool LoadStringArray(const toml::table& Table, const std::string_view Key, std::
     return true;
 }
 
+bool LoadStringArray(const toml::table& Table, const std::string_view Key, std::vector<std::string>& OutValues)
+{
+    const auto* Array = Table[Key].as_array();
+
+    if (Array == nullptr)
+    {
+        return false;
+    }
+
+    for (const auto& Item : *Array)
+    {
+        if (const auto Value = Item.value<std::string>())
+        {
+            OutValues.push_back(*Value);
+        }
+    }
+
+    return true;
+}
+
 bool ReadBoolOrDefault(const toml::table& Table, const std::string_view Key, const bool DefaultValue)
 {
     if (const auto* Value = Table.get_as<bool>(Key))
@@ -134,36 +160,40 @@ std::optional<Config> LoadConfig(const fs::path& ExecutableDirectory)
     Config LoadedConfig;
     LoadedConfig.Path = *ConfigPath;
 
-    const auto* DotfilesTable = ParsedConfig["dotfiles"].as_table();
-
-    if (DotfilesTable == nullptr)
+    if (const auto* DotfilesTable = ParsedConfig["dotfiles"].as_table())
     {
-        return LoadedConfig;
-    }
-
-    for (const auto& [Name, Node] : *DotfilesTable)
-    {
-        const auto* DotfileTable = Node.as_table();
-
-        if (DotfileTable == nullptr)
+        for (const auto& [Name, Node] : *DotfilesTable)
         {
-            continue;
+            const auto* DotfileTable = Node.as_table();
+
+            if (DotfileTable == nullptr)
+            {
+                continue;
+            }
+
+            auto& Dotfile = GetOrCreateDotfile(LoadedConfig, std::string{ Name.str() });
+
+            LoadStringArray(*DotfileTable, "paths", Dotfile.Paths);
+            LoadStringArray(*DotfileTable, "exclude", Dotfile.Excludes);
+            LoadStringArray(*DotfileTable, "excludes", Dotfile.Excludes);
+
+            Dotfile.BackupEmptyFiles = ReadBoolOrDefault(*DotfileTable, "backup_empty_files", true);
+            Dotfile.BackupEmptyDirectories = ReadBoolOrDefault(*DotfileTable, "backup_empty_dirs", true);
         }
-
-        auto& Dotfile = GetOrCreateDotfile(LoadedConfig, std::string{ Name.str() });
-
-        LoadStringArray(*DotfileTable, "paths", Dotfile.Paths);
-        LoadStringArray(*DotfileTable, "exclude", Dotfile.Excludes);
-        LoadStringArray(*DotfileTable, "excludes", Dotfile.Excludes);
-
-        Dotfile.BackupEmptyFiles = ReadBoolOrDefault(*DotfileTable, "backup_empty_files", true);
-        Dotfile.BackupEmptyDirectories = ReadBoolOrDefault(*DotfileTable, "backup_empty_dirs", true);
     }
 
     if (const auto* SystemdTable = ParsedConfig["systemd"].as_table())
     {
         LoadedConfig.BackupSystemdEnabledUnits = ReadBoolOrDefault(*SystemdTable, "backup_enabled_units", false);
         LoadedConfig.BackupSystemdUserEnabledUnits = ReadBoolOrDefault(*SystemdTable, "backup_user_enabled_units", false);
+    }
+
+    if (const auto* PackagesTable = ParsedConfig["packages"].as_table())
+    {
+        LoadedConfig.BackupPackages = ReadBoolOrDefault(*PackagesTable, "backup", false);
+        LoadStringArray(*PackagesTable, "exclude_pacman", LoadedConfig.ExcludedPacmanPackages);
+        LoadStringArray(*PackagesTable, "exclude_aur", LoadedConfig.ExcludedAurPackages);
+        LoadStringArray(*PackagesTable, "exclude_flatpak", LoadedConfig.ExcludedFlatpakPackages);
     }
 
     return LoadedConfig;
@@ -622,10 +652,7 @@ int ExportSystemdEnabledUnits(const fs::path& Root, const bool User)
         return 1;
     }
 
-    const std::string Command = std::string("systemctl ")
-        + (User ? "--user " : "")
-        + "list-unit-files --state=enabled --no-legend --no-pager | awk '{print $1}' > "
-        + ShellQuote(UnitsPath);
+    const std::string Command = std::string("systemctl ") + (User ? "--user " : "") + "list-unit-files --state=enabled --no-legend --no-pager | awk '{print $1}' > " + ShellQuote(UnitsPath);
 
     if (RunCommand(Command) != 0)
     {
@@ -654,6 +681,206 @@ std::vector<std::string> ReadLines(const fs::path& Path)
     return Lines;
 }
 
+bool Contains(const std::vector<std::string>& Values, const std::string& Value)
+{
+    for (const auto& CurrentValue : Values)
+    {
+        if (CurrentValue == Value)
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+std::vector<std::string> FilterExcluded(const std::vector<std::string>& Values, const std::vector<std::string>& Excludes)
+{
+    std::vector<std::string> FilteredValues;
+
+    for (const auto& Value : Values)
+    {
+        if (!Contains(Excludes, Value))
+        {
+            FilteredValues.push_back(Value);
+        }
+    }
+
+    return FilteredValues;
+}
+
+bool ReadCommandLines(const std::string& Command, std::vector<std::string>& OutLines)
+{
+    std::array<char, 256> Buffer{};
+    FILE* Pipe = popen(Command.c_str(), "r");
+
+    if (Pipe == nullptr)
+    {
+        std::cerr << "Could not run command: " << Command << '\n';
+        return false;
+    }
+
+    while (fgets(Buffer.data(), static_cast<int>(Buffer.size()), Pipe) != nullptr)
+    {
+        std::string Line = Buffer.data();
+
+        while (!Line.empty() && (Line.back() == '\n' || Line.back() == '\r'))
+        {
+            Line.pop_back();
+        }
+
+        if (!Line.empty())
+        {
+            OutLines.push_back(Line);
+        }
+    }
+
+    if (pclose(Pipe) != 0)
+    {
+        std::cerr << "Command returned a non-zero status: " << Command << '\n';
+        return false;
+    }
+
+    return true;
+}
+
+bool WriteLines(const fs::path& Path, const std::vector<std::string>& Lines)
+{
+    std::error_code Error;
+    fs::create_directories(Path.parent_path(), Error);
+
+    if (Error)
+    {
+        std::cerr << "Could not create " << Path.parent_path() << ": " << Error.message() << '\n';
+        return false;
+    }
+
+    std::ofstream File(Path);
+
+    if (!File)
+    {
+        std::cerr << "Could not write " << Path << '\n';
+        return false;
+    }
+
+    for (const auto& Line : Lines)
+    {
+        File << Line << '\n';
+    }
+
+    return true;
+}
+
+fs::path PackageListPath(const fs::path& Root, const std::string& Name)
+{
+    return Root / "packages" / (Name + ".txt");
+}
+
+int ExportPackageList(
+    const fs::path& Root,
+    const std::string& Name,
+    const std::string& Command,
+    const std::vector<std::string>& Excludes)
+{
+    std::vector<std::string> CommandOutput;
+
+    if (!ReadCommandLines(Command, CommandOutput))
+    {
+        return 1;
+    }
+
+    const std::vector<std::string> Packages = FilterExcluded(CommandOutput, Excludes);
+    const fs::path Destination = PackageListPath(Root, Name);
+
+    if (!WriteLines(Destination, Packages))
+    {
+        return 1;
+    }
+
+    std::cout << Name << " packages exported to " << Destination << ".\n";
+    return 0;
+}
+
+int ExportPackages(const fs::path& Root, const Config& ConfigValue)
+{
+    if (!ConfigValue.BackupPackages)
+    {
+        std::cout << "[SKIP] Package backup is disabled in pacdot.toml.\n";
+        return 0;
+    }
+
+    int Result = 0;
+    Result |= ExportPackageList(Root, "pacman", "pacman -Qqen", ConfigValue.ExcludedPacmanPackages);
+    Result |= ExportPackageList(Root, "aur", "pacman -Qqem", ConfigValue.ExcludedAurPackages);
+    Result |= ExportPackageList(Root, "flatpak", "flatpak list --app --columns=application", ConfigValue.ExcludedFlatpakPackages);
+    return Result == 0 ? 0 : 1;
+}
+
+std::string JoinShellArgs(const std::vector<std::string>& Values)
+{
+    std::string Joined;
+
+    for (const auto& Value : Values)
+    {
+        if (!Joined.empty())
+        {
+            Joined += ' ';
+        }
+
+        Joined += ShellQuote(Value);
+    }
+
+    return Joined;
+}
+
+int RestorePackageList(
+    const fs::path& Root,
+    const std::string& Name,
+    const std::string& InstallPrefix,
+    const bool DryRun)
+{
+    const fs::path Source = PackageListPath(Root, Name);
+
+    if (!fs::exists(Source))
+    {
+        std::cout << "[SKIP] " << Source << " does not exist.\n";
+        return 0;
+    }
+
+    const std::vector<std::string> Packages = ReadLines(Source);
+
+    if (Packages.empty())
+    {
+        std::cout << "[SKIP] " << Source << " is empty.\n";
+        return 0;
+    }
+
+    const std::string Command = InstallPrefix + JoinShellArgs(Packages);
+
+    if (DryRun)
+    {
+        std::cout << "[DRY-RUN] " << Command << '\n';
+        return 0;
+    }
+
+    return RunCommand(Command) == 0 ? 0 : 1;
+}
+
+int RestorePackages(const fs::path& Root, const Config& ConfigValue, const bool DryRun)
+{
+    if (!ConfigValue.BackupPackages)
+    {
+        std::cout << "[SKIP] Package backup is disabled in pacdot.toml.\n";
+        return 0;
+    }
+
+    int Result = 0;
+    Result |= RestorePackageList(Root, "pacman", "sudo pacman -S --needed -- ", DryRun);
+    Result |= RestorePackageList(Root, "aur", "paru -S --needed -- ", DryRun);
+    Result |= RestorePackageList(Root, "flatpak", "flatpak install -y flathub ", DryRun);
+    return Result == 0 ? 0 : 1;
+}
+
 int RestoreSystemdEnabledUnits(const fs::path& Root, const bool User, const bool DryRun)
 {
     const fs::path UnitsPath = SystemdEnabledUnitsPath(Root, User);
@@ -668,10 +895,7 @@ int RestoreSystemdEnabledUnits(const fs::path& Root, const bool User, const bool
 
     for (const auto& Unit : ReadLines(UnitsPath))
     {
-        const std::string Command = std::string("systemctl ")
-            + (User ? "--user " : "")
-            + "enable "
-            + ShellQuote(Unit);
+        const std::string Command = std::string("systemctl ") + (User ? "--user " : "") + "enable " + ShellQuote(Unit);
 
         if (DryRun)
         {
@@ -728,10 +952,15 @@ int ExportAll(const fs::path& Root, const Config& ConfigValue)
         Result |= ExportSystemdEnabledUnits(Root, true);
     }
 
+    if (ConfigValue.BackupPackages)
+    {
+        Result |= ExportPackages(Root, ConfigValue);
+    }
+
     return Result == 0 ? 0 : 1;
 }
 
-int RestoreAll(const fs::path& Root, const Config& ConfigValue, const bool DryRun)
+int RestoreAll(const fs::path& Root, const Config& ConfigValue, const bool DryRun, const bool InstallPackages)
 {
     int Result = 0;
     Result |= RestoreDotfiles(Root, ConfigValue, DryRun);
@@ -746,6 +975,18 @@ int RestoreAll(const fs::path& Root, const Config& ConfigValue, const bool DryRu
         Result |= RestoreSystemdEnabledUnits(Root, true, DryRun);
     }
 
+    if (ConfigValue.BackupPackages)
+    {
+        if (InstallPackages)
+        {
+            Result |= RestorePackages(Root, ConfigValue, DryRun);
+        }
+        else
+        {
+            std::cout << "[SKIP] Package installation skipped. Use --install-packages to install backed up packages.\n";
+        }
+    }
+
     return Result == 0 ? 0 : 1;
 }
 
@@ -754,16 +995,24 @@ void PrintHelp()
     std::cout << "Usage:\n";
     std::cout << "  pacdot --help\n";
     std::cout << "  pacdot export\n";
-    std::cout << "  pacdot restore [--dry-run]\n";
+    std::cout << "  pacdot restore [--dry-run] [--install-packages]\n";
     std::cout << "  pacdot dotfiles export\n";
     std::cout << "  pacdot dotfiles restore [--dry-run]\n";
+    std::cout << "  pacdot packages export\n";
+    std::cout << "  pacdot packages restore [--dry-run]\n";
     std::cout << '\n';
     std::cout << "Commands:\n";
-    std::cout << "  --help, -h                 Show this help message.\n";
-    std::cout << "  export                     Export configured dotfiles into pacdot-export.\n";
-    std::cout << "  restore [--dry-run]        Restore configured dotfiles from pacdot-export.\n";
-    std::cout << "  dotfiles export            Export only configured dotfiles.\n";
-    std::cout << "  dotfiles restore [--dry-run] Restore only configured dotfiles.\n";
+    std::cout << "  --help, -h                              Show this help message.\n";
+    std::cout << "  export                                  Export configured data into pacdot-export.\n";
+    std::cout << "  restore [--dry-run] [--install-packages] Restore configured data from pacdot-export.\n";
+    std::cout << "  dotfiles export                         Export only configured dotfiles.\n";
+    std::cout << "  dotfiles restore [--dry-run]            Restore only configured dotfiles.\n";
+    std::cout << "  packages export                         Export only configured package lists.\n";
+    std::cout << "  packages restore [--dry-run]            Install only backed up package lists.\n";
+    std::cout << '\n';
+    std::cout << "Options:\n";
+    std::cout << "  --dry-run                               Print restore actions without changing files or installing packages.\n";
+    std::cout << "  --install-packages                      Install backed up pacman, AUR, and Flatpak packages during restore.\n";
 }
 
 bool HasArg(const int Argc, char* Argv[], const std::string& Expected)
@@ -807,7 +1056,7 @@ int main(int Argc, char* Argv[])
     if (Command == "restore")
     {
         const auto LoadedConfig = LoadConfig(ExecutableDirectory);
-        return LoadedConfig ? RestoreAll(ExportRoot, *LoadedConfig, HasArg(Argc, Argv, "--dry-run")) : 1;
+        return LoadedConfig ? RestoreAll(ExportRoot, *LoadedConfig, HasArg(Argc, Argv, "--dry-run"), HasArg(Argc, Argv, "--install-packages")) : 1;
     }
 
     if (Command == "dotfiles")
@@ -835,6 +1084,34 @@ int main(int Argc, char* Argv[])
         if (DotfileCommand == "restore")
         {
             return RestoreDotfiles(ExportRoot, *LoadedConfig, HasArg(Argc, Argv, "--dry-run"));
+        }
+    }
+
+    if (Command == "packages")
+    {
+        if (Argc < 3)
+        {
+            PrintHelp();
+            return 1;
+        }
+
+        const auto LoadedConfig = LoadConfig(ExecutableDirectory);
+
+        if (!LoadedConfig)
+        {
+            return 1;
+        }
+
+        const std::string PackagesCommand = Argv[2];
+
+        if (PackagesCommand == "export")
+        {
+            return ExportPackages(ExportRoot, *LoadedConfig);
+        }
+
+        if (PackagesCommand == "restore")
+        {
+            return RestorePackages(ExportRoot, *LoadedConfig, HasArg(Argc, Argv, "--dry-run"));
         }
     }
 
