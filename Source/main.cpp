@@ -857,6 +857,36 @@ std::string JoinShellArgs(const std::vector<std::string>& Values)
     return Joined;
 }
 
+fs::path GetUserFlatpakRepoPath()
+{
+    if (const char* DataHomeValue = std::getenv("XDG_DATA_HOME"); DataHomeValue != nullptr && DataHomeValue[0] != '\0')
+    {
+        return fs::path(DataHomeValue) / "flatpak" / "repo";
+    }
+
+    if (const char* HomeValue = std::getenv("HOME"); HomeValue != nullptr && HomeValue[0] != '\0')
+    {
+        return fs::path(HomeValue) / ".local" / "share" / "flatpak" / "repo";
+    }
+
+    return {};
+}
+
+bool EnsureUserFlatpakRepo(const fs::path& RepoPath)
+{
+    std::error_code Error;
+    fs::create_directories(RepoPath.parent_path(), Error);
+
+    if (Error)
+    {
+        std::cerr << "Could not create " << RepoPath.parent_path() << ": " << Error.message() << '\n';
+        return false;
+    }
+
+    const std::string Command = "ostree --repo=" + ShellQuote(RepoPath) + " init --mode=archive-z2";
+    return RunCommand(Command) == 0;
+}
+
 std::vector<std::string> ReadPackageList(const fs::path& Root, const std::string& Name)
 {
     const fs::path Source = PackageListPath(Root, Name);
@@ -918,16 +948,30 @@ int RestoreFlatpakPackageList(const fs::path& Root, const bool DryRun)
         return 0;
     }
 
+    const fs::path RepoPath = GetUserFlatpakRepoPath();
+    if (RepoPath.empty())
+    {
+        std::cerr << "Could not determine the user Flatpak repository path.\n";
+        return 1;
+    }
+
+    const std::string InitCommand = "ostree --repo=" + ShellQuote(RepoPath) + " init --mode=archive-z2";
     const std::string RepairCommand = "flatpak repair --user";
     const std::string RemoteCommand = "flatpak --user remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo";
 
     if (DryRun)
     {
+        std::cout << "[DRY-RUN] " << InitCommand << '\n';
         std::cout << "[DRY-RUN] " << RepairCommand << '\n';
         std::cout << "[DRY-RUN] " << RemoteCommand << '\n';
     }
     else
     {
+        if (!EnsureUserFlatpakRepo(RepoPath))
+        {
+            return 1;
+        }
+
         if (RunCommand(RepairCommand) != 0)
         {
             std::cerr << "Could not repair the user Flatpak installation; continuing with remote setup.\n";
