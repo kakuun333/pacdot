@@ -1,6 +1,7 @@
 #include "glob-cpp/glob.h"
 #include "toml++/toml.hpp"
 #include <array>
+#include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -275,6 +276,105 @@ bool IsExcluded(const fs::path& Source, const fs::path& Destination, const std::
     return false;
 }
 
+std::string ShellQuote(const fs::path& Path);
+std::string ShellQuote(const std::string& Value);
+int RunCommand(const std::string& Command);
+
+bool IsPermissionDenied(const std::error_code& Error)
+{
+    return Error == std::errc::permission_denied;
+}
+
+bool RunElevatedCommand(const std::string& Reason, const std::string& Command)
+{
+    std::cerr << Reason << '\n';
+    return RunCommand("sudo " + Command) == 0;
+}
+
+bool RemovePathWithEscalation(const fs::path& Path)
+{
+    std::error_code Error;
+    fs::remove_all(Path, Error);
+
+    if (!Error)
+    {
+        return true;
+    }
+
+    if (!IsPermissionDenied(Error))
+    {
+        std::cerr << "Could not remove " << Path << ": " << Error.message() << '\n';
+        return false;
+    }
+
+    return RunElevatedCommand(
+        "Permission required to remove " + Path.string() + " because the destination is system-owned and requires elevated permissions.",
+        std::string("rm -rf -- ") + ShellQuote(Path));
+}
+
+bool CreateDirectoriesWithEscalation(const fs::path& Path)
+{
+    std::error_code Error;
+    fs::create_directories(Path, Error);
+
+    if (!Error)
+    {
+        return true;
+    }
+
+    if (!IsPermissionDenied(Error))
+    {
+        std::cerr << "Could not create " << Path << ": " << Error.message() << '\n';
+        return false;
+    }
+
+    return RunElevatedCommand(
+        "Permission required to create " + Path.string() + " because the destination directory is system-owned and requires elevated permissions.",
+        std::string("mkdir -p -- ") + ShellQuote(Path));
+}
+
+bool CopyFileWithEscalation(const fs::path& Source, const fs::path& Destination, const char* CopyLabel)
+{
+    std::error_code Error;
+    fs::copy_file(Source, Destination, fs::copy_options::overwrite_existing, Error);
+
+    if (!Error)
+    {
+        return true;
+    }
+
+    if (!IsPermissionDenied(Error))
+    {
+        std::cerr << "Could not copy " << CopyLabel << ' ' << Source << " -> " << Destination << ": " << Error.message() << '\n';
+        return false;
+    }
+
+    return RunElevatedCommand(
+        "Permission required to restore " + Destination.string() + " because the destination is system-owned and requires elevated permissions.",
+        std::string("cp -a --remove-destination -- ") + ShellQuote(Source) + ' ' + ShellQuote(Destination));
+}
+
+bool CopySymlinkWithEscalation(const fs::path& Source, const fs::path& Destination)
+{
+    std::error_code Error;
+    fs::copy_symlink(Source, Destination, Error);
+
+    if (!Error)
+    {
+        return true;
+    }
+
+    if (!IsPermissionDenied(Error))
+    {
+        std::cerr << "Could not copy symlink " << Source << " -> " << Destination << ": " << Error.message() << '\n';
+        return false;
+    }
+
+    return RunElevatedCommand(
+        "Permission required to restore " + Destination.string() + " because the destination is system-owned and requires elevated permissions.",
+        std::string("cp -a --remove-destination -- ") + ShellQuote(Source) + ' ' + ShellQuote(Destination));
+}
+
 bool CopyFileReplacing(const fs::path& Source, const fs::path& Destination)
 {
     std::error_code Error;
@@ -282,23 +382,25 @@ bool CopyFileReplacing(const fs::path& Source, const fs::path& Destination)
 
     if (Error)
     {
-        std::cerr << "Could not create " << Destination.parent_path() << ": " << Error.message() << '\n';
+        if (!IsPermissionDenied(Error))
+        {
+            std::cerr << "Could not create " << Destination.parent_path() << ": " << Error.message() << '\n';
+            return false;
+        }
+
+        if (!CreateDirectoriesWithEscalation(Destination.parent_path()))
+        {
+            return false;
+        }
+    }
+
+    if (!RemovePathWithEscalation(Destination))
+    {
         return false;
     }
 
-    fs::remove_all(Destination, Error);
-
-    if (Error)
+    if (!CopyFileWithEscalation(Source, Destination, "file"))
     {
-        std::cerr << "Could not remove " << Destination << ": " << Error.message() << '\n';
-        return false;
-    }
-
-    fs::copy_file(Source, Destination, fs::copy_options::overwrite_existing, Error);
-
-    if (Error)
-    {
-        std::cerr << "Could not copy " << Source << " -> " << Destination << ": " << Error.message() << '\n';
         return false;
     }
 
@@ -313,23 +415,25 @@ bool CopySymlinkReplacing(const fs::path& Source, const fs::path& Destination)
 
     if (Error)
     {
-        std::cerr << "Could not create " << Destination.parent_path() << ": " << Error.message() << '\n';
+        if (!IsPermissionDenied(Error))
+        {
+            std::cerr << "Could not create " << Destination.parent_path() << ": " << Error.message() << '\n';
+            return false;
+        }
+
+        if (!CreateDirectoriesWithEscalation(Destination.parent_path()))
+        {
+            return false;
+        }
+    }
+
+    if (!RemovePathWithEscalation(Destination))
+    {
         return false;
     }
 
-    fs::remove_all(Destination, Error);
-
-    if (Error)
+    if (!CopySymlinkWithEscalation(Source, Destination))
     {
-        std::cerr << "Could not remove " << Destination << ": " << Error.message() << '\n';
-        return false;
-    }
-
-    fs::copy_symlink(Source, Destination, Error);
-
-    if (Error)
-    {
-        std::cerr << "Could not copy symlink " << Source << " -> " << Destination << ": " << Error.message() << '\n';
         return false;
     }
 
@@ -447,29 +551,20 @@ bool CopyPath(
 
         if (!bDryRun && IncludeEmptyDirectories)
         {
-            fs::remove_all(Destination, Error);
-
-            if (Error)
+            if (!RemovePathWithEscalation(Destination))
             {
-                std::cerr << "Could not remove " << Destination << ": " << Error.message() << '\n';
                 return false;
             }
 
-            fs::create_directories(Destination, Error);
-
-            if (Error)
+            if (!CreateDirectoriesWithEscalation(Destination))
             {
-                std::cerr << "Could not create " << Destination << ": " << Error.message() << '\n';
                 return false;
             }
         }
         else if (!bDryRun)
         {
-            fs::remove_all(Destination, Error);
-
-            if (Error)
+            if (!RemovePathWithEscalation(Destination))
             {
-                std::cerr << "Could not remove " << Destination << ": " << Error.message() << '\n';
                 return false;
             }
         }
@@ -519,11 +614,8 @@ bool CopyPath(
             {
                 if (IncludeEmptyDirectories)
                 {
-                    fs::create_directories(EntryDestination, Error);
-
-                    if (Error)
+                    if (!CreateDirectoriesWithEscalation(EntryDestination))
                     {
-                        std::cerr << "Could not create " << EntryDestination << ": " << Error.message() << '\n';
                         bSuccess = false;
                     }
                 }
