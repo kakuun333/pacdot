@@ -1,11 +1,12 @@
 # pacdot
 
-`pacdot` backs up and restores a personal Arch Linux setup. It is designed around a simple export tree and a TOML config file, with support for dotfiles, miscellaneous files, systemd enabled units, and package lists.
+`pacdot` backs up and restores a personal Arch Linux setup. It is designed around a simple export tree and a TOML config file, with support for dotfiles, miscellaneous files, custom commands, systemd enabled units, and package lists.
 
 ## Features
 
 - Back up and restore dotfiles.
 - Back up and restore arbitrary files and directories, such as `~/Pictures/Wallpapers`.
+- Run custom commands during export or restore.
 - Back up and restore systemd enabled units.
 - Back up and restore package lists.
 - Restore protected system paths with elevated permissions when needed.
@@ -66,6 +67,12 @@ paths = [
     "~/Pictures/Wallpapers",
 ]
 
+[commands]
+restore = [
+    ["dms", "greeter", "enable"],
+    ["dms", "greeter", "sync"],
+]
+
 [systemd]
 backup_enabled_units = true
 backup_user_enabled_units = true
@@ -113,6 +120,27 @@ Example:
 [files.wallpapers]
 paths = [
     "~/Pictures/Wallpapers",
+]
+```
+
+#### `commands`
+
+Use this to run extra commands during `export` or `restore`.
+
+Each command is written as an array of strings. The first item is the executable, and the rest are arguments.
+
+Supported keys:
+
+- `export`: commands to run after a successful `pacdot export`.
+- `restore`: commands to run after a successful `pacdot restore`.
+
+Example:
+
+```toml
+[commands]
+restore = [
+    ["dms", "greeter", "enable"],
+    ["dms", "greeter", "sync"],
 ]
 ```
 

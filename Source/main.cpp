@@ -27,6 +27,8 @@ struct Config
     fs::path Path;
     std::vector<PathGroupDefinition> Dotfiles;
     std::vector<PathGroupDefinition> Files;
+    std::vector<std::vector<std::string>> ExportCommands;
+    std::vector<std::vector<std::string>> RestoreCommands;
     bool BackupSystemdEnabledUnits = false;
     bool BackupSystemdUserEnabledUnits = false;
     bool BackupPackages = false;
@@ -212,6 +214,37 @@ void LoadPathGroups(const toml::table& ParsedConfig, const std::string_view Tabl
     }
 }
 
+void LoadCommandLists(const toml::table& ParsedConfig, const std::string_view TableName, std::vector<std::vector<std::string>>& Commands)
+{
+    if (const auto* Array = ParsedConfig[TableName].as_array())
+    {
+        for (const auto& Item : *Array)
+        {
+            const auto* SubArray = Item.as_array();
+
+            if (SubArray == nullptr)
+            {
+                continue;
+            }
+
+            std::vector<std::string> Command;
+
+            for (const auto& SubItem : *SubArray)
+            {
+                if (const auto Value = SubItem.value<std::string>())
+                {
+                    Command.push_back(*Value);
+                }
+            }
+
+            if (!Command.empty())
+            {
+                Commands.push_back(Command);
+            }
+        }
+    }
+}
+
 std::optional<Config> LoadConfig()
 {
     const auto ConfigPath = FindConfigPath();
@@ -239,6 +272,11 @@ std::optional<Config> LoadConfig()
 
     LoadPathGroups(ParsedConfig, "dotfiles", LoadedConfig.Dotfiles);
     LoadPathGroups(ParsedConfig, "files", LoadedConfig.Files);
+    if (const auto* CommandsTable = ParsedConfig["commands"].as_table())
+    {
+        LoadCommandLists(*CommandsTable, "export", LoadedConfig.ExportCommands);
+        LoadCommandLists(*CommandsTable, "restore", LoadedConfig.RestoreCommands);
+    }
 
     if (const auto* SystemdTable = ParsedConfig["systemd"].as_table())
     {
@@ -535,10 +573,61 @@ std::string ShellQuote(const std::string& Value)
     return ShellQuote(fs::path(Value));
 }
 
+std::string JoinCommandArgs(const std::vector<std::string>& Values)
+{
+    std::string Joined;
+
+    for (const auto& Value : Values)
+    {
+        if (!Joined.empty())
+        {
+            Joined += ' ';
+        }
+
+        Joined += ShellQuote(Value);
+    }
+
+    return Joined;
+}
+
 int RunCommand(const std::string& Command)
 {
     std::cout << "[RUN] " << Command << '\n';
     return std::system(Command.c_str());
+}
+
+bool RunConfiguredCommand(const std::vector<std::string>& Command, const bool DryRun)
+{
+    if (Command.empty())
+    {
+        return true;
+    }
+
+    const std::string CommandLine = JoinCommandArgs(Command);
+
+    if (DryRun)
+    {
+        std::cout << "[DRY-RUN] " << CommandLine << '\n';
+        return true;
+    }
+
+    return RunCommand(CommandLine) == 0;
+}
+
+int RunConfiguredCommands(const std::vector<std::vector<std::string>>& Commands, const std::string& Label, const bool DryRun)
+{
+    int Result = 0;
+
+    for (const auto& Command : Commands)
+    {
+        if (!RunConfiguredCommand(Command, DryRun))
+        {
+            std::cerr << "Could not run a configured " << Label << " command.\n";
+            Result = 1;
+        }
+    }
+
+    return Result;
 }
 
 fs::path BackupPathFor(const fs::path& Root, const std::string& Category, const std::string& Name, const fs::path& Source, const fs::path& Home)
@@ -1247,6 +1336,11 @@ int ExportAll(const fs::path& Root, const Config& ConfigValue)
         Result |= ExportPackages(Root, ConfigValue);
     }
 
+    if (Result == 0)
+    {
+        Result |= RunConfiguredCommands(ConfigValue.ExportCommands, "export", false);
+    }
+
     return Result == 0 ? 0 : 1;
 }
 
@@ -1276,6 +1370,11 @@ int RestoreAll(const fs::path& Root, const Config& ConfigValue, const bool DryRu
         {
             std::cout << "[SKIP] Package installation skipped. Use --install-packages to install backed up packages.\n";
         }
+    }
+
+    if (Result == 0)
+    {
+        Result |= RunConfiguredCommands(ConfigValue.RestoreCommands, "restore", DryRun);
     }
 
     return Result == 0 ? 0 : 1;
