@@ -171,6 +171,10 @@ Supported keys:
 - `exclude_aur`: names to skip from the AUR list.
 - `exclude_flatpak`: application IDs to skip from the Flatpak list.
 
+## Installation
+#### AUR:
+https://aur.archlinux.org/packages/pacdot-bin
+
 ## Build
 
 Requirements:
